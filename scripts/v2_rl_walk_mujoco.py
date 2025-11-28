@@ -159,7 +159,7 @@ class RLWalk:
                 imu_data["accelero"],
                 cmds,
                 dof_pos - self.init_pos,
-                dof_vel * 0.15,
+                dof_vel * 0.05,
                 self.last_action,
                 self.last_last_action,
                 self.last_last_last_action,
