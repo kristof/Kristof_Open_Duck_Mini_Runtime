@@ -95,8 +95,16 @@ class RLWalk:
         self.paused = self.duck_config.start_paused
 
         self.command_freq = 20  # hz
+        self.controller_connected = False
         if self.commands:
-            self.xbox_controller = XBoxController(self.command_freq)
+            try:
+                self.xbox_controller = XBoxController(self.command_freq)
+                self.controller_connected = True
+                print("Xbox controller connected")
+            except Exception as e:
+                print(f"Warning: Could not connect to Xbox controller: {e}")
+                print("Running without controller - robot will stay idle")
+                self.controller_connected = False
 
         # Reference motion, but we only really need the length of one phase
         # TODO
@@ -206,47 +214,63 @@ class RLWalk:
                 right_trigger = 0
                 t = time.time()
 
-                if self.commands:
-                    self.last_commands, self.buttons, left_trigger, right_trigger = (
-                        self.xbox_controller.get_last_command()
-                    )
-                    if self.buttons.dpad_up.triggered:
-                        self.phase_frequency_factor_offset += 0.05
-                        print(
-                            f"Phase frequency factor offset {round(self.phase_frequency_factor_offset, 3)}"
+                if self.commands and self.controller_connected:
+                    try:
+                        self.last_commands, self.buttons, left_trigger, right_trigger = (
+                            self.xbox_controller.get_last_command()
                         )
+                        if self.buttons.dpad_up.triggered:
+                            self.phase_frequency_factor_offset += 0.05
+                            print(
+                                f"Phase frequency factor offset {round(self.phase_frequency_factor_offset, 3)}"
+                            )
 
-                    if self.buttons.dpad_down.triggered:
-                        self.phase_frequency_factor_offset -= 0.05
-                        print(
-                            f"Phase frequency factor offset {round(self.phase_frequency_factor_offset, 3)}"
-                        )
+                        if self.buttons.dpad_down.triggered:
+                            self.phase_frequency_factor_offset -= 0.05
+                            print(
+                                f"Phase frequency factor offset {round(self.phase_frequency_factor_offset, 3)}"
+                            )
 
-                    if self.buttons.LB.is_pressed:
-                        self.phase_frequency_factor = 1.3
-                    else:
-                        self.phase_frequency_factor = 1.0
-
-                    if self.buttons.X.triggered:
-                        if self.duck_config.projector:
-                            self.projector.switch()
-
-                    if self.buttons.B.triggered:
-                        if self.duck_config.speaker:
-                            self.sounds.play_random_sound()
-
-                    if self.duck_config.antennas:
-                        self.antennas.set_position_left(right_trigger)
-                        self.antennas.set_position_right(left_trigger)
-
-                    if self.buttons.A.triggered:
-                        self.paused = not self.paused
-                        if self.paused:
-                            print("PAUSE")
+                        if self.buttons.LB.is_pressed:
+                            self.phase_frequency_factor = 1.3
                         else:
-                            print("UNPAUSE")
+                            self.phase_frequency_factor = 1.0
+
+                        if self.buttons.X.triggered:
+                            if self.duck_config.projector:
+                                self.projector.switch()
+
+                        if self.buttons.B.triggered:
+                            if self.duck_config.speaker:
+                                self.sounds.play_random_sound()
+
+                        if self.duck_config.antennas:
+                            self.antennas.set_position_left(right_trigger)
+                            self.antennas.set_position_right(left_trigger)
+
+                        if self.buttons.A.triggered:
+                            self.paused = not self.paused
+                            if self.paused:
+                                print("PAUSE")
+                            else:
+                                print("UNPAUSE")
+                    except Exception as e:
+                        # Controller disconnected - use last known commands and pause
+                        print(f"Controller error: {e}")
+                        print("Controller disconnected - pausing robot")
+                        self.controller_connected = False
+                        self.last_commands = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]  # Stop moving
+                        self.paused = True
 
                 if self.paused:
+                    # Try to reconnect controller if disconnected
+                    if self.commands and not self.controller_connected:
+                        try:
+                            self.xbox_controller = XBoxController(self.command_freq)
+                            self.controller_connected = True
+                            print("Xbox controller reconnected! Press A to unpause.")
+                        except Exception:
+                            pass  # Still disconnected, keep trying
                     time.sleep(0.1)
                     continue
 
