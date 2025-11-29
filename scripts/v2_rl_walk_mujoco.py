@@ -35,6 +35,7 @@ class RLWalk:
         save_obs=False,
         replay_obs=None,
         cutoff_frequency=None,
+        standing_onnx_path=None,  # Optional standing policy for dual-policy mode
     ):
 
         self.duck_config = DuckConfig(config_json_path=duck_config_path)
@@ -42,8 +43,17 @@ class RLWalk:
         self.commands = commands
         self.pitch_bias = pitch_bias
 
+        # Dual-policy mode: use standing policy when idle
+        self.dual_policy_mode = standing_onnx_path is not None
+        self.idle_threshold = 0.01  # Command magnitude threshold for switching
+
         self.onnx_model_path = onnx_model_path
         self.policy = OnnxInfer(self.onnx_model_path, awd=True)
+
+        # Load standing policy for dual-policy mode
+        if self.dual_policy_mode:
+            print("Dual-policy mode enabled: using standing policy when idle")
+            self.standing_policy = OnnxInfer(standing_onnx_path, awd=True)
 
         self.num_dofs = 14
         self.max_motor_velocity = 5.24  # rad/s
@@ -167,13 +177,54 @@ class RLWalk:
                 imu_data["accelero"],
                 cmds,
                 dof_pos - self.init_pos,
-                dof_vel * 0.15,  # Must match training dof_vel_scale
+                dof_vel * 0.05,
                 self.last_action,
                 self.last_last_action,
                 self.last_last_last_action,
                 self.motor_targets,
                 feet_contacts,
                 self.imitation_phase,
+            ]
+        )
+
+        return obs
+
+    def get_obs_for_standing(self):
+        """Get observation for standing policy with fixed imitation_phase [1.0, 0.0]"""
+        imu_data = self.imu.get_data()
+
+        dof_pos = self.hwi.get_present_positions(
+            ignore=["left_antenna", "right_antenna"]
+        )
+        dof_vel = self.hwi.get_present_velocities(
+            ignore=["left_antenna", "right_antenna"]
+        )
+
+        if dof_pos is None or dof_vel is None:
+            return None
+
+        if len(dof_pos) != self.num_dofs or len(dof_vel) != self.num_dofs:
+            return None
+
+        cmds = self.last_commands
+        feet_contacts = self.feet_contacts.get()
+
+        # Standing policy expects fixed imitation_phase
+        standing_imitation_phase = np.array([1.0, 0.0])
+
+        obs = np.concatenate(
+            [
+                imu_data["gyro"],
+                imu_data["accelero"],
+                cmds,
+                dof_pos - self.init_pos,
+                dof_vel * 0.05,
+                self.last_action,
+                self.last_last_action,
+                self.last_last_last_action,
+                self.motor_targets,
+                feet_contacts,
+                standing_imitation_phase,  # Fixed phase for standing
             ]
         )
 
@@ -303,7 +354,25 @@ class RLWalk:
                         print("BREAKING ")
                         break
 
-                action = self.policy.infer(obs)
+                # Check if idle (no movement commands)
+                cmd_magnitude = np.linalg.norm(self.last_commands[:3])
+                is_idle = cmd_magnitude < self.idle_threshold
+
+                if is_idle:
+                    if self.dual_policy_mode:
+                        # Use standing policy when idle
+                        # Standing policy expects fixed imitation_phase [1.0, 0.0]
+                        standing_obs = self.get_obs_for_standing()
+                        if standing_obs is not None:
+                            action = self.standing_policy.infer(standing_obs)
+                        else:
+                            action = np.zeros(self.num_dofs)
+                    else:
+                        # Fallback: output zero action (stay at home position)
+                        action = np.zeros(self.num_dofs)
+                else:
+                    # Use main policy when moving
+                    action = self.policy.infer(obs)
 
                 self.last_last_last_action = self.last_last_action.copy()
                 self.last_last_action = self.last_action.copy()
@@ -368,7 +437,9 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--onnx_model_path", type=str, required=True,
-                        help="Path to policy ONNX file")
+                        help="Path to main policy (joystick)")
+    parser.add_argument("--standing_onnx_path", type=str, default=None,
+                        help="Path to standing policy for dual-policy mode (optional)")
     parser.add_argument(
         "--duck_config_path",
         type=str,
@@ -418,6 +489,7 @@ if __name__ == "__main__":
         save_obs=args.save_obs,
         replay_obs=args.replay_obs,
         cutoff_frequency=args.cutoff_frequency,
+        standing_onnx_path=args.standing_onnx_path,
     )
     print("Done instantiating RLWalk")
     rl_walk.run()
