@@ -35,6 +35,7 @@ class RLWalk:
         save_obs=False,
         replay_obs=None,
         cutoff_frequency=None,
+        standing_onnx_path=None,  # Optional standing policy for dual-policy mode
     ):
 
         self.duck_config = DuckConfig(config_json_path=duck_config_path)
@@ -42,8 +43,17 @@ class RLWalk:
         self.commands = commands
         self.pitch_bias = pitch_bias
 
+        # Dual-policy mode: use standing policy when idle
+        self.dual_policy_mode = standing_onnx_path is not None
+        self.idle_threshold = 0.01  # Command magnitude threshold for switching
+
         self.onnx_model_path = onnx_model_path
         self.policy = OnnxInfer(self.onnx_model_path, awd=True)
+
+        # Load standing policy for dual-policy mode
+        if self.dual_policy_mode:
+            print("Dual-policy mode enabled: using standing policy when idle")
+            self.standing_policy = OnnxInfer(standing_onnx_path, awd=True)
 
         self.num_dofs = 14
         self.max_motor_velocity = 5.24  # rad/s
@@ -303,13 +313,24 @@ class RLWalk:
                         print("BREAKING ")
                         break
 
-                action = self.policy.infer(obs)
+                # Check if idle (no movement commands)
+                cmd_magnitude = np.linalg.norm(self.last_commands[:3])
+                is_idle = cmd_magnitude < self.idle_threshold
+
+                if is_idle:
+                    if self.dual_policy_mode:
+                        # Use standing policy when idle
+                        action = self.standing_policy.infer(obs)
+                    else:
+                        # Fallback: output zero action (stay at home position)
+                        action = np.zeros(self.num_dofs)
+                else:
+                    # Use main policy when moving
+                    action = self.policy.infer(obs)
 
                 self.last_last_last_action = self.last_last_action.copy()
                 self.last_last_action = self.last_action.copy()
                 self.last_action = action.copy()
-
-                # action = np.zeros(10)
 
                 self.motor_targets = self.init_pos + action * self.action_scale
 
@@ -369,7 +390,10 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--onnx_model_path", type=str, required=True)
+    parser.add_argument("--onnx_model_path", type=str, required=True,
+                        help="Path to main policy (joystick)")
+    parser.add_argument("--standing_onnx_path", type=str, default=None,
+                        help="Path to standing policy for dual-policy mode (optional)")
     parser.add_argument(
         "--duck_config_path",
         type=str,
@@ -419,6 +443,7 @@ if __name__ == "__main__":
         save_obs=args.save_obs,
         replay_obs=args.replay_obs,
         cutoff_frequency=args.cutoff_frequency,
+        standing_onnx_path=args.standing_onnx_path,
     )
     print("Done instantiating RLWalk")
     rl_walk.run()
