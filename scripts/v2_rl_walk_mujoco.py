@@ -189,6 +189,47 @@ class RLWalk:
 
         return obs
 
+    def get_obs_for_standing(self):
+        """Get observation for standing policy with fixed imitation_phase [1.0, 0.0]"""
+        imu_data = self.imu.get_data()
+
+        dof_pos = self.hwi.get_present_positions(
+            ignore=["left_antenna", "right_antenna"]
+        )
+        dof_vel = self.hwi.get_present_velocities(
+            ignore=["left_antenna", "right_antenna"]
+        )
+
+        if dof_pos is None or dof_vel is None:
+            return None
+
+        if len(dof_pos) != self.num_dofs or len(dof_vel) != self.num_dofs:
+            return None
+
+        cmds = self.last_commands
+        feet_contacts = self.feet_contacts.get()
+
+        # Standing policy expects fixed imitation_phase
+        standing_imitation_phase = np.array([1.0, 0.0])
+
+        obs = np.concatenate(
+            [
+                imu_data["gyro"],
+                imu_data["accelero"],
+                cmds,
+                dof_pos - self.init_pos,
+                dof_vel * 0.05,
+                self.last_action,
+                self.last_last_action,
+                self.last_last_last_action,
+                self.motor_targets,
+                feet_contacts,
+                standing_imitation_phase,  # Fixed phase for standing
+            ]
+        )
+
+        return obs
+
     def start(self):
         kps = [self.pid[0]] * 14
         kds = [self.pid[2]] * 14
@@ -320,7 +361,12 @@ class RLWalk:
                 if is_idle:
                     if self.dual_policy_mode:
                         # Use standing policy when idle
-                        action = self.standing_policy.infer(obs)
+                        # Standing policy expects fixed imitation_phase [1.0, 0.0]
+                        standing_obs = self.get_obs_for_standing()
+                        if standing_obs is not None:
+                            action = self.standing_policy.infer(standing_obs)
+                        else:
+                            action = np.zeros(self.num_dofs)
                     else:
                         # Fallback: output zero action (stay at home position)
                         action = np.zeros(self.num_dofs)
